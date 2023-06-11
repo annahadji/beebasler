@@ -5,10 +5,10 @@ from the camera as requested on localhost:8000.
 
 ## Getting started
 
-Clone the repo, pip install the dependencies (in `requirements.txt`) and run using `python3 record.py`. Whilst filming, you can
-navigate to https://localhost:8000 and refresh to request to preview a current frame from camera.
+Clone the repo, install the dependencies and run using `python3 record.py`. Whilst filming, you can
+navigate to https://localhost:8000 and refresh to preview a current frame from camera.
 
-There are a few parameters that can be used to configure filming:
+There are a few parameters used to configure filming:
 
 ```
 (.venv) [19:08:54] 🚀 beebasler $ python3 record.py --help
