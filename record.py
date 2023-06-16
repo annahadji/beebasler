@@ -7,6 +7,7 @@ import logging
 import multiprocessing as mp
 import multiprocessing.connection as mp_conn
 import pathlib
+import json
 import time
 import subprocess
 import sys
@@ -102,18 +103,21 @@ def record(args: dict, preview_conn: mp_conn.Connection) -> None:
     cam.Open()  # Enable access to camera features
     cam.UserSetSelector = "Default"  # Always good to start from power-on state
     cam.UserSetLoad.Execute()
-    cam.MaxNumBuffer = 10
+    cam.MaxNumBuffer = 5000
+    logger.info(f"Cam max buffer number: {cam.MaxNumBuffer.Value}")
     logger.info(
         f"Max framerate in wakeup config: {round(cam.ResultingFrameRate.Value, 3)} fps."
     )
-    logger.info(f"Starting temperature status: {cam.TemperatureState.Value}.\n")
+    logger.info(f"Start temp status: {cam.TemperatureState.Value}.\n")  # i.e. Ok.
     # -----
     # Set features of device
-    if args["use_binning"]:  # Binning - helps to increase frame rate
+    if args["use_binning"]:  # Binning helps to increase frame rate
         logger.info(f"Horizontal and vertical binning to increase frame rate.")
         cam.BinningHorizontal = 2
         cam.BinningVertical = 2
     logger.info(f"Camera h x w: {cam.Height.Value, cam.Width.Value}.")
+    args["camera_height"] = cam.Height.Value
+    args["camera_width"] = cam.Width.Value
     cam.ExposureTime = args["exposure_time"]
     logger.info(f"Exposure time set to: {round(cam.ExposureTime.Value, 3)}.")
     # Sets upper limit for camera's fps (camera will not go above even if factors allow for higher fps)
@@ -183,8 +187,9 @@ def record(args: dict, preview_conn: mp_conn.Connection) -> None:
                     raise RuntimeError("Grab failed.")
     except KeyboardInterrupt:
         logger.info("Interrupted by user input. Ending recording...")
-
-    logger.info(f"Time elapsed: {datetime.datetime.now() - now}.")
+    time_elapsed_filming = datetime.datetime.now() - now  # NB this isnt resulting fps
+    args["time_elapsed_filming_s"] = str(time_elapsed_filming)
+    logger.info(f"Time elapsed: {time_elapsed_filming}.")
     cam.StopGrabbing()
     cam.Close()
     logger.info(f"Recorded output {args['file_out']} saved.")
@@ -196,6 +201,8 @@ def record(args: dict, preview_conn: mp_conn.Connection) -> None:
     timestamps = np.array(timestamps)  # (num_images_to_grab,)
     timepoints = convert_to_timepoints(timestamps)  # (num_images_to_grab,)
     np.savez(f"{args['file_out']}-timepoints", timepoints=timepoints)
+    with open(f"{args['file_out']}-config.json", "w") as f:
+        json.dump(args, f)
     # -----
     # Plot perfect timeline of frame grabbing vs what we actually got
     perfect_timeline = np.linspace(0, args["record_n_seconds"], num=num_images_to_grab)
