@@ -372,7 +372,7 @@ if __name__ == "__main__":
         "--gain",
         type=float,
         default=5,
-        help="Desired exposure time of camera. Defaults to 2000 microseconds.",
+        help="Desired gain of camera. Defaults to 5.",
     )
     parser.add_argument(
         "--use_binning",
