@@ -1,6 +1,7 @@
 """Record video from Basler camera using pypylon, and preview images on request
 at localhost:8000. Tested on the acA1440-220um Basler camera running at 200 fps."""
 import argparse
+import base64
 import datetime
 import http.server
 import logging
@@ -74,22 +75,95 @@ def preview_server(server_conn: mp_conn.Connection) -> None:
                 np_img = np.frombuffer(response, dtype=np.uint8).reshape(
                     (height, width)
                 )  # (H, W)
-                png_encoded = iio.imwrite("<bytes>", np_img, extension=".png")
+                png_encoded = base64.b64encode(
+                    iio.imwrite("<bytes>", np_img, extension=".png")
+                ).decode()
                 self.send_response(200)
-                # Send png image
-                self.send_header("Content-type", "image/png")
-                self.send_header("Content-length", len(png_encoded))
+                # Embed img into html and add js to send coords of mouse click on img
+                html = """
+                <html>
+                    <body>
+                        <img id="myImage" style="max-width:100%;max-height:100%;height:auto" src="data:image/png;base64,{}">
+                    </body>
+                    <script>
+                    document.getElementById('myImage').onclick = function(event) {{
+                        var x = event.offsetX;
+                        var y = event.offsetY;
+                        var img = document.getElementById('myImage');
+                        var width = img.width;
+                        var height = img.height;
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('POST', '/click');
+                        xhr.setRequestHeader('Content-Type', 'application/json');
+                        xhr.send(JSON.stringify({{x: x, y: y, w: width, h: height}}));
+                    }}
+                    </script>
+                </html>""".format(
+                    png_encoded
+                )
+                self.send_header("Content-type", "text/html")
                 self.end_headers()
-                self.wfile.write(png_encoded)
+                self.wfile.write(html.encode())
             else:
                 self.send_response(200)
                 self.send_header("Content-type", "text/plain")
                 self.end_headers()
                 self.wfile.write(b"Frame received timeout.")
 
+        def do_POST(self):
+            if self.path == "/click":
+                content_length = int(self.headers["Content-Length"])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                x, y, w, h = data["x"], data["y"], data["w"], data["h"]
+                logger.info(
+                    f"Click registered by handler at ({x}, {y}) for img sized ({w} x {h})."
+                )
+                server_conn.send_bytes(b"click")
+                server_conn.send_bytes(x.to_bytes(4, "little"))
+                server_conn.send_bytes(y.to_bytes(4, "little"))
+                server_conn.send_bytes(w.to_bytes(4, "little"))
+                server_conn.send_bytes(h.to_bytes(4, "little"))
+                self.send_response(200)
+                self.end_headers()
+
     with http.server.HTTPServer(("", 8000), handler) as httpd:
         logger.info("Previews serving at port https://localhost:8000")
         httpd.serve_forever()
+
+
+def adjust_offset(num, divisible_by: int = 4):
+    """Return offset to be nearest divisible by 4."""
+    return round(num / divisible_by) * divisible_by
+
+
+def get_original_coords(
+    downsized_coords, downsized_h, downsized_w, original_h, original_w
+):
+    logger.info("Getting original centre coords...")
+    scale_x = original_w / downsized_w
+    scale_y = original_h / downsized_h
+    original_x = int(downsized_coords[0] * scale_x)
+    original_y = int(downsized_coords[1] * scale_y)
+    return (original_x, original_y)
+
+
+def get_top_left_of_centred_coords(
+    centred_coords, max_crop_h, max_crop_w, original_h, original_w
+):
+    logger.info("Shifting original coords...")
+    x = centred_coords[0] - (max_crop_w // 2)
+    y = centred_coords[1] - (max_crop_h // 2)
+    # Check and shift for overlap with the borders of the image
+    if x < 0:
+        x += abs(x)
+    if (x + max_crop_w) > original_w:
+        x -= x + max_crop_w - original_w
+    if y < 0:
+        y += abs(y)
+    if (y + max_crop_h) > original_h:
+        y -= y + max_crop_w - original_h
+    return (x, y)
 
 
 def record(args: dict, preview_conn: mp_conn.Connection) -> None:
@@ -103,23 +177,75 @@ def record(args: dict, preview_conn: mp_conn.Connection) -> None:
     cam.Open()  # Enable access to camera features
     cam.UserSetSelector = "Default"  # Always good to start from power-on state
     cam.UserSetLoad.Execute()
-    cam.MaxNumBuffer = 5000
-    logger.info(f"Cam max buffer number: {cam.MaxNumBuffer.Value}")
+    cam.MaxNumBuffer = 8000
+    logger.info(f"Cam max buffer number: {cam.MaxNumBuffer.Value}.")
+    cam.PixelFormat = "Mono8"
+    logger.info(f"Pixel format set to: {cam.PixelFormat.Value}.")
+    # cam.BalanceWhiteAuto = "Off"
+    # logger.info(f"Balance white auto set to: {cam.BalanceWhiteAuto.Value}.")
     logger.info(
         f"Max framerate in wakeup config: {round(cam.ResultingFrameRate.Value, 3)} fps."
     )
-    logger.info(f"Start temp status: {cam.TemperatureState.Value}.\n")  # i.e. Ok.
+    # logger.info(f"Start temp status: {cam.TemperatureState.Value}.\n")  # i.e. Ok.
     # -----
     # Set features of device
     if args["use_binning"]:  # Binning helps to increase frame rate
         logger.info(f"Horizontal and vertical binning to increase frame rate.")
         cam.BinningHorizontal = 2
         cam.BinningVertical = 2
+    cam.ExposureTime = args["exposure_time"]
+    logger.info(f"Exposure time set to: {round(cam.ExposureTime.Value, 3)}.")
+    cam.Gain = args["gain"]
+    logger.info(f"Gain set to: {cam.Gain.Value}.")
+    # Set initial height and width of camera to be smaller
+    # cam.Width = 5328
+    # cam.OffsetY = 2204
+    # cam.BslColorSpace = "Off"
+    # -----
+    # Optional, launch camera in pure preview
+    cropping = True
+    if args["crop"]:
+        max_crop_height, max_crop_width = 800, 800
+        while cropping is True:
+            if preview_conn.poll():
+                request = preview_conn.recv_bytes()
+                if request == b"newframe":  # Received request for new frame
+                    img = cam.GrabOne(100).GetArray()
+                    original_h, original_w = img.shape
+                    print(img.shape)
+                    preview_conn.send_bytes(original_h.to_bytes(2, "little"))
+                    preview_conn.send_bytes(original_w.to_bytes(2, "little"))
+                    preview_conn.send_bytes(img.tobytes())
+                    logger.info("Sent preview frame.")
+                elif request == b"click":  # Received click coordinates
+                    x = int.from_bytes(preview_conn.recv_bytes(), "little")
+                    y = int.from_bytes(preview_conn.recv_bytes(), "little")
+                    w = int.from_bytes(preview_conn.recv_bytes(), "little")
+                    h = int.from_bytes(preview_conn.recv_bytes(), "little")
+                    logger.info(f"Received click coords: ({x}, {y}).")
+                    cam.AcquisitionStop.Execute()  # Cam stop
+                    cam.TLParamsLocked = False  # Grab unlock
+                    cam.Width = max_crop_width
+                    cam.Height = max_crop_height
+                    # Need to map the offset back to the original dims before css
+                    # rescales the image
+                    x, y = get_original_coords((x, y), h, w, original_h, original_w)
+                    x, y = get_top_left_of_centred_coords(
+                        (x, y), max_crop_height, max_crop_width, original_h, original_w
+                    )
+                    x = adjust_offset(x)
+                    y = adjust_offset(y)
+                    cam.OffsetX = x
+                    cam.OffsetY = y
+                    cam.TLParamsLocked = True  # Grab lock
+                    cam.AcquisitionStart.Execute()  # Cam start
+                    cropping = False
+                    logger.info("New camera ROI being recorded.")
+                    cam.GrabOne(100)
+
     logger.info(f"Camera h x w: {cam.Height.Value, cam.Width.Value}.")
     args["camera_height"] = cam.Height.Value
     args["camera_width"] = cam.Width.Value
-    cam.ExposureTime = args["exposure_time"]
-    logger.info(f"Exposure time set to: {round(cam.ExposureTime.Value, 3)}.")
     # Sets upper limit for camera's fps (camera will not go above even if factors allow for higher fps)
     # If other factors limit fps below this, fps wont be affected by acquisition fps feature.
     cam.AcquisitionFrameRateEnable = True
@@ -145,7 +271,7 @@ def record(args: dict, preview_conn: mp_conn.Connection) -> None:
             "-preset",  # set to fast, faster, veryfast, superfast, ultrafast
             "fast",  # for higher speed but worse compression
             "-crf",  # quality; set to 0 for lossless, but keep in mind
-            "24",  # that the camera probably adds static anyway
+            "0",  # that the camera probably adds static anyway
         ],
     )
     # --------------
@@ -154,7 +280,7 @@ def record(args: dict, preview_conn: mp_conn.Connection) -> None:
     # Recording
     now = datetime.datetime.now()
     logger.info(f"Recording {args['record_n_seconds']} second video at {now}...")
-    num_images_to_grab = int(args["record_n_seconds"] * estimated_fps)
+    num_images_to_grab = round(args["record_n_seconds"] * estimated_fps)
     cam.StartGrabbingMax(num_images_to_grab, pylon.GrabStrategy_OneByOne)
     timestamps = []
     try:
@@ -176,13 +302,12 @@ def record(args: dict, preview_conn: mp_conn.Connection) -> None:
                     # Check if there is a request to preview a frame
                     if preview_conn.poll():
                         request = preview_conn.recv_bytes()
-                        if request == b"newframe":  # Received requset for new frame
+                        if request == b"newframe":  # Received request for new frame
                             height, width = img.shape
                             preview_conn.send_bytes(height.to_bytes(2, "little"))
                             preview_conn.send_bytes(width.to_bytes(2, "little"))
                             preview_conn.send_bytes(img.tobytes())
                             logger.info("Sent preview frame.")
-                    # print(cam.SensorReadoutTime.Value)
                 else:
                     raise RuntimeError("Grab failed.")
     except KeyboardInterrupt:
@@ -244,6 +369,12 @@ if __name__ == "__main__":
         help="Desired exposure time of camera. Defaults to 2000 microseconds.",
     )
     parser.add_argument(
+        "--gain",
+        type=float,
+        default=5,
+        help="Desired exposure time of camera. Defaults to 2000 microseconds.",
+    )
+    parser.add_argument(
         "--use_binning",
         action="store_true",
         help="Whether or not to reduce image resolution by binning.",
@@ -259,6 +390,11 @@ if __name__ == "__main__":
         type=str,
         default=f"outputs/{time.strftime('%Y-%m-%d')}/recording-{time.strftime('%Y-%m-%d-%H%M')}",
         help="Name of recording. Appropriate extension will be added on save.",
+    )
+    parser.add_argument(
+        "--crop",
+        action="store_true",
+        help="Wont start filming unless a crop selection has been selected from local host.",
     )
     args = vars(parser.parse_args())
     # -----
