@@ -12,7 +12,7 @@ There are a few parameters used to configure filming:
 
 ```
 (.venv) [19:08:54] 🚀 beebasler $ python3 record.py --help
-usage: record.py [-h] [--fps FPS] [--exposure_time EXPOSURE_TIME] [--use_binning] [--record_n_seconds RECORD_N_SECONDS] [--file_out FILE_OUT]
+usage: record.py [-h] [--fps FPS] [--exposure_time EXPOSURE_TIME] [--gain GAIN] [--use_binning] [--record_n_seconds RECORD_N_SECONDS] [--file_out FILE_OUT] [--crop]
 
 Record from Basler camera.
 
@@ -21,8 +21,10 @@ optional arguments:
   --fps FPS             Desired frame rate of camera in Hz. Defaults to 200 Hz.
   --exposure_time EXPOSURE_TIME
                         Desired exposure time of camera. Defaults to 2000 microseconds.
+  --gain GAIN           Desired gain of camera. Defaults to 2000 microseconds.
   --use_binning         Whether or not to reduce image resolution by binning.
   --record_n_seconds RECORD_N_SECONDS
                         Desired length of time to record for in seconds. Defaults to 10 s.
   --file_out FILE_OUT   Name of recording. Appropriate extension will be added on save.
+  --crop                Wont start filming unless a crop selection has been selected from local host.
 ```
